@@ -8,10 +8,10 @@ const PORT = process.env.PORT || 3000;
 const GITHUB_OWNER = 'Ayush8481-dev'; // <--- CHANGE THIS
 const GITHUB_REPO = 'Epgdata';        // <--- CHANGE THIS
 
-// Helper to escape special characters for valid XML
+// Helper to escape special characters for valid XML (Safely converted to String)
 const escapeXml = (unsafe) => {
-    if (!unsafe) return '';
-    return unsafe.replace(/[<>&'"]/g, function (c) {
+    if (unsafe === null || unsafe === undefined || unsafe === '') return '';
+    return String(unsafe).replace(/[<>&'"]/g, function (c) {
         switch (c) {
             case '<': return '&lt;';
             case '>': return '&gt;';
@@ -24,7 +24,7 @@ const escapeXml = (unsafe) => {
 
 // Helper to convert Epoch time (1786041000000) to XMLTV format (YYYYMMDDHHMMSS +0000)
 const getXmltvTime = (epoch) => {
-    const d = new Date(epoch);
+    const d = new Date(Number(epoch)); // Wrapped in Number() to prevent string parse errors
     const pad = (n) => n.toString().padStart(2, '0');
     const YYYY = d.getUTCFullYear();
     const MM = pad(d.getUTCMonth() + 1);
@@ -74,7 +74,11 @@ async function runEpgTask(chunk, start, limit, offset) {
 
         let channelsXml = '';
         let programmesXml = '';
-        let fileDate = ''; // Will store 'YYYY-MM-DD'
+        
+        // Calculate the date upfront instead of extracting it from the API!
+        // This prevents the loop from crashing on starting channels that miss 'serverDate'.
+        const targetDate = new Date(Date.now() + (offset * 86400000));
+        const fileDate = targetDate.toISOString().substring(0, 10);
 
         // 2. Loop through our chunk of channels safely
         for (let i = 0; i < targetChannels.length; i++) {
@@ -87,7 +91,7 @@ async function runEpgTask(chunk, start, limit, offset) {
             channelsXml += `  </channel>\n`;
 
             // 3. Fetch EPG Data for this channel
-            const jioUrl = `https://jiotvapi.cdn.jio.com/apis/v1.3/getepg/get?channel_id=${ch.id}&offset=${offset}`;
+            const jioUrl = `https://jiotvapi.cdn.jio.com/apis/v1.3/getepg/get?channel_id=${ch.id}&offset=${offset}&langId=6`;
             
             try {
                 const epgResponse = await fetch(jioUrl, {
@@ -98,11 +102,6 @@ async function runEpgTask(chunk, start, limit, offset) {
                     const epgData = await epgResponse.json();
 
                     if (epgData.epg && epgData.epg.length > 0) {
-                        // Capture the date from the first valid program to name our file!
-                        if (!fileDate) {
-                            fileDate = epgData.epg[0].serverDate.substring(0, 10); 
-                        }
-
                         // Generate <programme> XML tags
                         for (const prog of epgData.epg) {
                             const startTime = getXmltvTime(prog.startEpoch);
@@ -119,6 +118,8 @@ async function runEpgTask(chunk, start, limit, offset) {
                                 iconUrl = prog.assets["16:9"].originalProgram;
                             } else if (prog.episodeThumbnail) {
                                 iconUrl = `https://jiotv.catchup.cdn.jio.com/dare_images/${prog.episodeThumbnail}`;
+                            } else if (prog.episodePoster) {
+                                iconUrl = `https://jiotv.catchup.cdn.jio.com/dare_images/shows/${prog.episodePoster}`;
                             }
                             if (iconUrl) programmesXml += `    <icon src="${escapeXml(iconUrl)}"/>\n`;
                             
@@ -132,12 +133,6 @@ async function runEpgTask(chunk, start, limit, offset) {
 
             // ⏱️ THE MAGIC DELAY: Wait 500ms (2 requests per second) to prevent bans
             await new Promise(resolve => setTimeout(resolve, 500));
-        }
-
-        // If all channels failed and we still don't have a date, calculate it manually based on the offset
-        if (!fileDate) {
-            const fallbackDate = new Date(Date.now() + (offset * 86400000));
-            fileDate = fallbackDate.toISOString().substring(0, 10);
         }
 
         // 4. Combine all the XML data perfectly
