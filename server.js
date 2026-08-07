@@ -47,7 +47,7 @@ app.get('/generate', async (req, res) => {
 async function runEpgTask(chunk, start, limit, offset) {
     try {
         console.log(`[Chunk ${chunk}] Fetching channel list...`);
-        const chReq = await fetch("https://jtvxweb.pages.dev/jstr4web.json");
+        const chReq = await fetch("https://raw.githubusercontent.com/Ayush8481Lab/KuchuShow/refs/heads/main/ayushtv.json");
         const channelsData = await chReq.json();
         const channelsArray = Array.isArray(channelsData) ? channelsData : (channelsData.channels || []);
 
