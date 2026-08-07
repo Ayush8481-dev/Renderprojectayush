@@ -5,148 +5,139 @@ const PORT = process.env.PORT || 3000;
 // ==========================================
 // ⚙️ GITHUB CONFIGURATION
 // ==========================================
-const GITHUB_OWNER = 'Ayush8481-dev'; // <--- CHANGE THIS
-const GITHUB_REPO = 'Epgdata';        // <--- CHANGE THIS
+const GITHUB_OWNER = "ayush8481lab"; // <--- CHANGE THIS IF NEEDED
+const GITHUB_REPO = "KuchuShow";     // <--- CHANGE THIS IF NEEDED
 
+// High-speed Native String replace for XML
+const escapeMap = { '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' };
 const escapeXml = (unsafe) => {
-    if (unsafe === null || unsafe === undefined || unsafe === '') return '';
-    return String(unsafe).replace(/[<>&'"]/g, function (c) {
-        switch (c) {
-            case '<': return '&lt;';
-            case '>': return '&gt;';
-            case '&': return '&amp;';
-            case '\'': return '&apos;';
-            case '"': return '&quot;';
-        }
-    });
+    if (!unsafe) return "";
+    return String(unsafe).replace(/[<>&'"]/g, c => escapeMap[c]);
 };
 
-const getXmltvTime = (epoch) => {
-    const d = new Date(Number(epoch));
-    const pad = (n) => n.toString().padStart(2, '0');
-    const YYYY = d.getUTCFullYear();
-    const MM = pad(d.getUTCMonth() + 1);
-    const DD = pad(d.getUTCDate());
-    const HH = pad(d.getUTCHours());
-    const mm = pad(d.getUTCMinutes());
-    const ss = pad(d.getUTCSeconds());
-    return `${YYYY}${MM}${DD}${HH}${mm}${ss} +0000`;
+// Ultra-Fast Native Date slicing into IST (+0530)
+const formatXmltvTime = (epoch) => {
+    const iso = new Date(Number(epoch) + 19800000).toISOString(); 
+    return iso.substring(0,4) + iso.substring(5,7) + iso.substring(8,10) + iso.substring(11,13) + iso.substring(14,16) + iso.substring(17,19) + " +0530";
 };
 
 // ==========================================
-// 🚀 THE MAIN API ENDPOINT
+// 🚀 API ENDPOINT
 // ==========================================
 app.get('/generate', async (req, res) => {
     const chunk = req.query.chunk || '1';
     const start = parseInt(req.query.start) || 0;
-    const limit = parseInt(req.query.limit) || 200;
+    const limit = parseInt(req.query.limit) || 200; 
     const offset = parseInt(req.query.offset) || 0;
     const trigger = req.query.trigger === 'true';
 
     if (trigger) {
-        res.send(`✅ Background task started for Chunk ${chunk} (Start: ${start}, Limit: ${limit}). Will fetch all at once. You can close this page!`);
+        // Instantly release the cron-job connection
+        res.status(200).json({ success: true, message: `Worker started for Chunk ${chunk}. Downloading directly from JioTV...` });
         runEpgTask(chunk, start, limit, offset); 
     } else {
         await runEpgTask(chunk, start, limit, offset);
-        res.send(`✅ Chunk ${chunk} completed and uploaded to GitHub instantly!`);
+        res.send(`✅ Chunk ${chunk} completed!`);
     }
 });
 
 // ==========================================
-// 🛠️ HIGH-SPEED BACKGROUND WORKER
+// 🛠️ HEAVY BACKGROUND WORKER
 // ==========================================
 async function runEpgTask(chunk, start, limit, offset) {
     try {
-        console.log(`[Chunk ${chunk}] Fetching master channel list...`);
-        
-        const listResponse = await fetch('https://jtvxweb.pages.dev/jstr4web.json');
-        const allChannels = await listResponse.json();
+        console.log(`[Chunk ${chunk}] Fetching channel list...`);
+        const chReq = await fetch("https://jtvxweb.pages.dev/jstr4web.json");
+        const channelsData = await chReq.json();
+        const channelsArray = Array.isArray(channelsData) ? channelsData : (channelsData.channels || []);
 
-        const targetChannels = allChannels.slice(start, start + limit);
-        console.log(`[Chunk ${chunk}] Firing ${targetChannels.length} requests concurrently...`);
+        const validChannels = channelsArray.map(c => ({
+            name: c.name, logo: c.logo || c.logoUrl || "", jio_id: String(c.id || c.channel_id).trim()
+        })).filter(c => c.jio_id && /^\d+$/.test(c.jio_id));
 
-        // 1. FORMAT: Generate ALL Channel Tags instantly at the top
-        let channelsXml = '';
-        for (const ch of targetChannels) {
-            channelsXml += `  <channel id="${ch.id}">\n`;
-            channelsXml += `    <display-name>${escapeXml(ch.name)}</display-name>\n`;
-            if (ch.logo) channelsXml += `    <icon src="${escapeXml(ch.logo)}"/>\n`;
-            channelsXml += `  </channel>\n`;
-        }
+        const batch = validChannels.slice(start, start + limit);
+        if (batch.length === 0) return console.log(`[Chunk ${chunk}] No more channels.`);
 
-        // 2. EXECUTION: Fire all 200 HTTP requests AT THE EXACT SAME TIME using Promise.all
-        const fetchPromises = targetChannels.map(async (ch) => {
-            const jioUrl = `https://jiotv.data.cdn.jio.com/apis/v1.3/getepg/get?channel_id=${ch.id}&offset=${offset}`;
-            try {
-                const epgResponse = await fetch(jioUrl, {
-                    headers: { 'User-Agent': 'okhttp/4.2.2', 'os': 'android', 'Accept': '*/*' }
-                });
-                
-                if (!epgResponse.ok) return { xml: '', firstEpoch: null };
-                
-                const epgData = await epgResponse.json();
-                if (!epgData.epg || epgData.epg.length === 0) return { xml: '', firstEpoch: null };
+        console.log(`[Chunk ${chunk}] Firing ${batch.length} concurrent direct requests...`);
 
-                let tempProgXml = '';
-                const firstEpoch = epgData.epg[0].startEpoch; // Extract epoch for Date later
-
-                for (const prog of epgData.epg) {
-                    const startTime = getXmltvTime(prog.startEpoch);
-                    const stopTime = getXmltvTime(prog.endEpoch);
+        // Resilient Fetch Function with 5 Retries (Handles random dropped requests)
+        const fetchChannelWithRetry = async (channel) => {
+            const jioUrl = `https://jiotvapi.cdn.jio.com/apis/v1.3/getepg/get?channel_id=${channel.jio_id}&offset=${offset}`;
+            
+            let retries = 5; 
+            while (retries > 0) {
+                try {
+                    const epgRes = await fetch(jioUrl, {
+                        headers: { 
+                            'User-Agent': 'okhttp/4.2.2',
+                            'os': 'android',
+                            'Accept': '*/*'
+                        }
+                    });
                     
-                    tempProgXml += `  <programme start="${startTime}" stop="${stopTime}" channel="${ch.id}">\n`;
-                    tempProgXml += `    <title>${escapeXml(prog.showname)}</title>\n`;
-                    if (prog.description) tempProgXml += `    <desc>${escapeXml(prog.description)}</desc>\n`;
-                    if (prog.showCategory) tempProgXml += `    <category>${escapeXml(prog.showCategory)}</category>\n`;
-                    
-                    let iconUrl = '';
-                    if (prog.assets && prog.assets["16:9"] && prog.assets["16:9"].originalProgram) {
-                        iconUrl = prog.assets["16:9"].originalProgram;
-                    } else if (prog.episodeThumbnail) {
-                        iconUrl = `https://jiotv.catchup.cdn.jio.com/dare_images/${prog.episodeThumbnail}`;
-                    } else if (prog.episodePoster) {
-                        iconUrl = `https://jiotv.catchup.cdn.jio.com/dare_images/shows/${prog.episodePoster}`;
-                    }
-                    if (iconUrl) tempProgXml += `    <icon src="${escapeXml(iconUrl)}"/>\n`;
-                    tempProgXml += `  </programme>\n`;
+                    if (epgRes.ok) return { channel, data: await epgRes.json() };
+                    if (epgRes.status === 404) return { channel, data: null };
+                } catch (err) {
+                    // Wait 500ms before retrying to let the network recover
+                    await new Promise(r => setTimeout(r, 500));
+                }
+                retries--;
+            }
+            return { channel, data: null };
+        };
+
+        // Fire all requests concurrently! (No ScraperAPI needed)
+        const fetchPromises = batch.map((channel) => fetchChannelWithRetry(channel));
+        const results = await Promise.all(fetchPromises);
+
+        const xmlLines = [];
+        let dynamicServerDate = null;
+
+        // Loop through results and apply exact Interleaved Layout (Channel -> Programs)
+        for (let i = 0; i < results.length; i++) {
+            const { channel, data } = results[i];
+            
+            // Format Logo Fallback
+            let finalLogo = channel.logo;
+            if (finalLogo && !finalLogo.startsWith("http")) finalLogo = `https://jiotv.catchup.cdn.jio.com/dare_images/images/${finalLogo}`;
+
+            // Create <channel> Tag
+            let channelBlock = `  <channel id="${channel.jio_id}">\n    <display-name>${escapeXml(channel.name)}</display-name>`;
+            if (finalLogo) channelBlock += `\n    <icon src="${escapeXml(finalLogo)}" />`;
+            channelBlock += `\n  </channel>`;
+            
+            xmlLines.push(channelBlock);
+
+            // Create <programme> Tags immediately underneath
+            if (data && data.epg && data.epg.length > 0) {
+                if (!dynamicServerDate && data.epg[0].serverDate) {
+                    dynamicServerDate = data.epg[0].serverDate.substring(0, 10); 
                 }
 
-                return { xml: tempProgXml, firstEpoch: firstEpoch };
-            } catch (err) {
-                console.error(`[Chunk ${chunk}] Request failed for ${ch.name}: ${err.message}`);
-                return { xml: '', firstEpoch: null };
-            }
-        });
-
-        // ⏱️ Wait a maximum of ~2-3 seconds for all 200 channels to finish!
-        const epgResults = await Promise.all(fetchPromises);
-
-        // 3. Extract the correct exact File Date securely from the successful data
-        let fileDate = '';
-        for (const res of epgResults) {
-            if (res.firstEpoch) {
-                const epochDate = new Date(Number(res.firstEpoch));
-                const yyyy = epochDate.getUTCFullYear();
-                const mm = String(epochDate.getUTCMonth() + 1).padStart(2, '0');
-                const dd = String(epochDate.getUTCDate()).padStart(2, '0');
-                fileDate = `${yyyy}-${mm}-${dd}`;
-                break; // Date acquired successfully, stop searching
+                for (let j = 0; j < data.epg.length; j++) {
+                    const show = data.epg[j];
+                    const startXml = formatXmltvTime(show.startEpoch);
+                    const stopXml = formatXmltvTime(show.endEpoch);
+                    const titleXml = escapeXml(show.showname);
+                    const descXml = show.description ? `\n    <desc>${escapeXml(show.description)}</desc>` : "";
+                    const catXml = show.showCategory ? `\n    <category>${escapeXml(show.showCategory)}</category>` : "";
+                    
+                    xmlLines.push(`  <programme start="${startXml}" stop="${stopXml}" channel="${channel.jio_id}">\n    <title>${titleXml}</title>${descXml}${catXml}\n  </programme>`);
+                }
             }
         }
-        
-        if (!fileDate) {
-            const fallbackDate = new Date(Date.now() + (offset * 86400000));
-            fileDate = fallbackDate.toISOString().substring(0, 10);
+
+        // Apply Server Date Fallback if missing
+        if (!dynamicServerDate) {
+            const istDate = new Date(Date.now() + 19800000 + (offset * 86400000)); 
+            dynamicServerDate = istDate.toISOString().substring(0, 10);
         }
 
-        // 4. Combine all the extracted program data together at the bottom
-        const programmesXml = epgResults.map(result => result.xml).join('');
-
-        // 5. Perfect Output: <tv> -> All Channels -> All Programmes -> </tv>
-        const finalXml = `<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n${channelsXml}\n${programmesXml}</tv>`;
+        // Combine into Final Output
+        const finalXml = `<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n${xmlLines.join('\n')}\n</tv>`;
 
         // Upload to GitHub
-        const FILE_PATH = `Epg/${fileDate}-${chunk}.xml`;
+        const FILE_PATH = `Epg/${dynamicServerDate}-${chunk}.xml`;
         await uploadToGitHub(FILE_PATH, finalXml, chunk);
 
     } catch (error) {
@@ -158,26 +149,31 @@ async function runEpgTask(chunk, start, limit, offset) {
 // ☁️ GITHUB UPLOADER
 // ==========================================
 async function uploadToGitHub(filePath, xmlContent, chunkName) {
+    const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+    if (!GITHUB_TOKEN) return console.error("❌ MISSING GITHUB TOKEN!");
+
     console.log(`[Chunk ${chunkName}] Preparing to upload: ${filePath}`);
-    
     const githubFileUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${filePath}`;
     const fileContentBase64 = Buffer.from(xmlContent, 'utf-8').toString('base64');
-    let fileSha = undefined;
-
-    const checkExisting = await fetch(githubFileUrl, {
-        headers: { 'Authorization': `Bearer ${process.env.GITHUB_TOKEN}` }
-    });
     
-    if (checkExisting.ok) {
-        const existingFileData = await checkExisting.json();
-        fileSha = existingFileData.sha;
-    }
+    // Check for existing file so we don't get 422 Errors on Overwrite
+    let fileSha = undefined;
+    try {
+        const checkExisting = await fetch(githubFileUrl, {
+            headers: { 'Authorization': `Bearer ${GITHUB_TOKEN}` }
+        });
+        if (checkExisting.ok) {
+            const existingFileData = await checkExisting.json();
+            fileSha = existingFileData.sha;
+        }
+    } catch(e) {}
 
     const uploadResponse = await fetch(githubFileUrl, {
         method: 'PUT',
         headers: {
-            'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
-            'Content-Type': 'application/json'
+            'Authorization': `Bearer ${GITHUB_TOKEN}`,
+            'Content-Type': 'application/json',
+            'User-Agent': 'Express-EPG-Generator'
         },
         body: JSON.stringify({
             message: `Auto-updated EPG Chunk ${chunkName}`,
@@ -194,8 +190,5 @@ async function uploadToGitHub(filePath, xmlContent, chunkName) {
     }
 }
 
-app.get('/', (req, res) => {
-    res.send("EPG Generator is running! Trigger chunks via /generate");
-});
-
+app.get('/', (req, res) => res.send("EPG Scraper is Running!"));
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
