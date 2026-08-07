@@ -5,8 +5,8 @@ const PORT = process.env.PORT || 3000;
 // ==========================================
 // ⚙️ GITHUB CONFIGURATION
 // ==========================================
-const GITHUB_OWNER = "ayush8481lab"; // <--- CHANGE THIS IF NEEDED
-const GITHUB_REPO = "KuchuShow";     // <--- CHANGE THIS IF NEEDED
+const GITHUB_OWNER = "Ayush8481-dev"; // <--- CHANGE THIS IF NEEDED
+const GITHUB_REPO = "Epgdata";     // <--- CHANGE THIS IF NEEDED
 
 // High-speed Native String replace for XML
 const escapeMap = { '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' };
