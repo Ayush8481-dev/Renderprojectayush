@@ -152,22 +152,52 @@ async function uploadToGitHub(filePath, xmlContent, chunkName) {
     const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
     if (!GITHUB_TOKEN) return console.error("❌ MISSING GITHUB TOKEN!");
 
-    console.log(`[Chunk ${chunkName}] Preparing to upload: ${filePath}`);
+    console.log(`[Chunk ${chunkName}] Preparing to process: ${filePath}`);
     const githubFileUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${filePath}`;
     const fileContentBase64 = Buffer.from(xmlContent, 'utf-8').toString('base64');
     
-    // Check for existing file so we don't get 422 Errors on Overwrite
+    // STEP 1: Check if the exact same file exists
     let fileSha = undefined;
     try {
-        const checkExisting = await fetch(githubFileUrl, {
-            headers: { 'Authorization': `Bearer ${GITHUB_TOKEN}` }
+        const checkExisting = await fetch(`${githubFileUrl}?t=${Date.now()}`, { // cache buster ensures live check
+            headers: { 
+                'Authorization': `Bearer ${GITHUB_TOKEN}`,
+                'Cache-Control': 'no-cache'
+            }
         });
         if (checkExisting.ok) {
             const existingFileData = await checkExisting.json();
             fileSha = existingFileData.sha;
         }
-    } catch(e) {}
+    } catch(e) {
+        console.error(`[Chunk ${chunkName}] Error checking for existing file.`);
+    }
 
+    // STEP 2: If the file exists, DELETE it first
+    if (fileSha) {
+        console.log(`[Chunk ${chunkName}] 🗑️ Exact same file found. Deleting it first...`);
+        const deleteRes = await fetch(githubFileUrl, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': `Bearer ${GITHUB_TOKEN}`,
+                'Content-Type': 'application/json',
+                'User-Agent': 'Express-EPG-Generator'
+            },
+            body: JSON.stringify({
+                message: `Deleting existing EPG Chunk ${chunkName} before new upload`,
+                sha: fileSha
+            })
+        });
+
+        if (deleteRes.ok) {
+            console.log(`[Chunk ${chunkName}] ✅ Old file deleted successfully.`);
+        } else {
+            console.error(`[Chunk ${chunkName}] ⚠️ Failed to delete old file.`);
+        }
+    }
+
+    // STEP 3: UPLOAD the fresh new file
+    console.log(`[Chunk ${chunkName}] 📤 Uploading new file...`);
     const uploadResponse = await fetch(githubFileUrl, {
         method: 'PUT',
         headers: {
@@ -176,9 +206,8 @@ async function uploadToGitHub(filePath, xmlContent, chunkName) {
             'User-Agent': 'Express-EPG-Generator'
         },
         body: JSON.stringify({
-            message: `Auto-updated EPG Chunk ${chunkName}`,
-            content: fileContentBase64,
-            sha: fileSha 
+            message: `Auto-uploaded fresh EPG Chunk ${chunkName}`,
+            content: fileContentBase64
         })
     });
 
