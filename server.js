@@ -8,11 +8,18 @@ const PORT = process.env.PORT || 3000;
 const GITHUB_OWNER = "Ayush8481-dev"; // <--- CHANGE THIS IF NEEDED
 const GITHUB_REPO = "Epgdata";     // <--- CHANGE THIS IF NEEDED
 
-// High-speed Native String replace for XML
+// High-speed Native String replace for XML (Escape)
 const escapeMap = { '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' };
 const escapeXml = (unsafe) => {
     if (!unsafe) return "";
     return String(unsafe).replace(/[<>&'"]/g, c => escapeMap[c]);
+};
+
+// High-speed Native String replace for XML (Unescape - Used for exact match comparison)
+const unescapeMap = { '&lt;': '<', '&gt;': '>', '&amp;': '&', '&apos;': "'", '&quot;': '"' };
+const unescapeXml = (safe) => {
+    if (!safe) return "";
+    return String(safe).replace(/&lt;|&gt;|&amp;|&apos;|&quot;/g, c => unescapeMap[c]);
 };
 
 // Ultra-Fast Native Date slicing into IST (+0530)
@@ -21,8 +28,16 @@ const formatXmltvTime = (epoch) => {
     return iso.substring(0,4) + iso.substring(5,7) + iso.substring(8,10) + iso.substring(11,13) + iso.substring(14,16) + iso.substring(17,19) + " +0530";
 };
 
+// JioTV Full Language Mapping Table
+const langMap = {
+    'hindi': 1, 'marathi': 2, 'punjabi': 3, 'urdu': 4,
+    'bengali': 5, 'english': 6, 'malayalam': 7, 'tamil': 8,
+    'gujarati': 9, 'odia': 10, 'telugu': 11, 'bhojpuri': 12,
+    'kannada': 13, 'assamese': 14, 'nepali': 15, 'french': 16
+};
+
 // ==========================================
-// 🚀 API ENDPOINT
+// 🚀 API ENDPOINT - GENERATOR
 // ==========================================
 app.get('/generate', async (req, res) => {
     const chunk = req.query.chunk || '1';
@@ -42,6 +57,94 @@ app.get('/generate', async (req, res) => {
 });
 
 // ==========================================
+// 🧹 API ENDPOINT - AUTO CLEANUP (10 DAYS)
+// ==========================================
+app.get('/delete', async (req, res) => {
+    const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+    if (!GITHUB_TOKEN) return res.status(500).json({ success: false, error: "MISSING GITHUB TOKEN!" });
+
+    try {
+        // Calculate the threshold date (Exactly 10 days ago in IST)
+        const thresholdDate = new Date(Date.now() - (10 * 86400000) + 19800000).toISOString().substring(0, 10);
+        console.log(`[Cleaner] Checking for files older than: ${thresholdDate}`);
+
+        // Fetch directory contents
+        const dirUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/Epg`;
+        const dirRes = await fetch(dirUrl, {
+            headers: { 
+                'Authorization': `Bearer ${GITHUB_TOKEN}`,
+                'Cache-Control': 'no-cache'
+            }
+        });
+
+        if (!dirRes.ok) throw new Error("Failed to fetch Epg directory from GitHub");
+        
+        const files = await dirRes.json();
+        if (!Array.isArray(files)) return res.json({ success: true, message: "No files found or directory is empty." });
+
+        const filesToDelete = [];
+
+        // Identify files older than 10 days
+        for (const file of files) {
+            // Match pattern: YYYY-MM-DD-chunk.xml (e.g., 2026-08-07-1.xml)
+            const match = file.name.match(/^(\d{4}-\d{2}-\d{2})-\d+\.xml$/);
+            if (match) {
+                const fileDateStr = match[1];
+                // Native ultra-fast string comparison (YYYY-MM-DD format allows alphabetical comparison)
+                if (fileDateStr < thresholdDate) {
+                    filesToDelete.push({
+                        path: file.path,
+                        sha: file.sha,
+                        name: file.name
+                    });
+                }
+            }
+        }
+
+        if (filesToDelete.length === 0) {
+            return res.json({ success: true, message: `No old chunks found. Retaining strictly 10 days catchup.` });
+        }
+
+        // Instantly release the connection so the cron job doesn't timeout
+        res.status(200).json({ 
+            success: true, 
+            message: `Background cleanup started! Deleting ${filesToDelete.length} chunks older than 10 days.` 
+        });
+
+        // Delete files in background one by one to avoid GitHub API abuse rate-limits
+        (async () => {
+            for (const file of filesToDelete) {
+                try {
+                    const delUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${file.path}`;
+                    await fetch(delUrl, {
+                        method: 'DELETE',
+                        headers: {
+                            'Authorization': `Bearer ${GITHUB_TOKEN}`,
+                            'Content-Type': 'application/json',
+                            'User-Agent': 'Express-EPG-Generator'
+                        },
+                        body: JSON.stringify({
+                            message: `Auto-Cleanup: Deleting 10+ day old Catchup EPG chunk (${file.name})`,
+                            sha: file.sha
+                        })
+                    });
+                    console.log(`[Cleaner] 🗑️ Successfully deleted old chunk: ${file.name}`);
+                    // 1 Second delay to prevent rate limiting
+                    await new Promise(r => setTimeout(r, 1000));
+                } catch (err) {
+                    console.error(`[Cleaner] ⚠️ Failed to delete ${file.name}:`, err.message);
+                }
+            }
+            console.log(`[Cleaner] ✅ 10-Day Cleanup Cycle Complete!`);
+        })();
+
+    } catch (error) {
+        console.error(`[Cleaner] ERROR:`, error.message);
+        if (!res.headersSent) res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ==========================================
 // 🛠️ HEAVY BACKGROUND WORKER
 // ==========================================
 async function runEpgTask(chunk, start, limit, offset) {
@@ -51,11 +154,14 @@ async function runEpgTask(chunk, start, limit, offset) {
         const channelsData = await chReq.json();
         const channelsArray = Array.isArray(channelsData) ? channelsData : (channelsData.channels || []);
 
+        // Pre-compute ALL JioTV Channel Names for exact case-sensitive Samsung Deduplication
+        const allJioChannelNames = new Set(channelsArray.map(c => c.name));
+
         const validChannels = channelsArray.map(c => ({
             name: c.name, 
             logo: c.logo || c.logoUrl || "", 
             jio_id: String(c.id || c.channel_id).trim(),
-            category: c.category || "" // <-- ADDED: Extract category
+            category: c.category || ""
         })).filter(c => c.jio_id && /^\d+$/.test(c.jio_id));
 
         const batch = validChannels.slice(start, start + limit);
@@ -65,10 +171,12 @@ async function runEpgTask(chunk, start, limit, offset) {
 
         // Resilient Fetch Function with 5 Retries (Handles random dropped requests)
         const fetchChannelWithRetry = async (channel) => {
-            // <-- ADDED: Dynamic URL generation based on category
             let jioUrl = `https://jiotvapi.cdn.jio.com/apis/v1.3/getepg/get?channel_id=${channel.jio_id}&offset=${offset}`;
-            if (channel.category.toLowerCase() === 'telugu') {
-                jioUrl += `&langId=11`;
+            
+            // Smart Language Assignment based on the 16 Categories Map
+            const catName = channel.category.toLowerCase().trim();
+            if (langMap[catName]) {
+                jioUrl += `&langId=${langMap[catName]}`;
             }
             
             let retries = 5; 
@@ -131,6 +239,63 @@ async function runEpgTask(chunk, start, limit, offset) {
                     
                     xmlLines.push(`  <programme start="${startXml}" stop="${stopXml}" channel="${channel.jio_id}">\n    <title>${titleXml}</title>${descXml}${catXml}\n  </programme>`);
                 }
+            }
+        }
+
+        // ==========================================
+        // 🔄 CHUNK 6: SAMSUNG TV PLUS EPG MERGE
+        // ==========================================
+        if (String(chunk) === '6') {
+            try {
+                console.log(`[Chunk ${chunk}] Fetching Samsung TV Plus EPG for merging...`);
+                const samRes = await fetch("https://raw.githubusercontent.com/matthuisman/i.mjh.nz/refs/heads/master/SamsungTVPlus/in.xml");
+                if (samRes.ok) {
+                    const samText = await samRes.text();
+                    const skippedSamIds = new Set();
+                    let addedChannels = 0;
+                    let addedProgrammes = 0;
+
+                    // Parse Samsung <channel> Tags
+                    const channelRegex = /<channel id="([^"]+)">([\s\S]*?)<\/channel>/g;
+                    let match;
+                    while ((match = channelRegex.exec(samText)) !== null) {
+                        const fullBlock = match[0];
+                        const id = match[1];
+                        const inner = match[2];
+                        
+                        const nameMatch = /<display-name[^>]*>([^<]+)<\/display-name>/.exec(inner);
+                        if (nameMatch) {
+                            const name = unescapeXml(nameMatch[1].trim()); // Decode XML special chars to match raw Jio Name
+                            
+                            // Exact Case-Sensitive Match Check with JioTV List
+                            if (allJioChannelNames.has(name)) {
+                                skippedSamIds.add(id); // Mark ID to skip all its future programs
+                            } else {
+                                xmlLines.push(fullBlock);
+                                addedChannels++;
+                            }
+                        } else {
+                            xmlLines.push(fullBlock);
+                            addedChannels++;
+                        }
+                    }
+
+                    // Parse Samsung <programme> Tags safely skipping duplicates
+                    const progRegex = /<programme[^>]+channel="([^"]+)"[^>]*>[\s\S]*?<\/programme>/g;
+                    while ((match = progRegex.exec(samText)) !== null) {
+                        const fullBlock = match[0];
+                        const id = match[1];
+                        
+                        // Only add programs for channels that were NOT skipped
+                        if (!skippedSamIds.has(id)) {
+                            xmlLines.push(fullBlock);
+                            addedProgrammes++;
+                        }
+                    }
+                    console.log(`[Chunk ${chunk}] ✅ Merged Samsung EPG: Added ${addedChannels} unique channels & ${addedProgrammes} programmes. (Duplicates skipped successfully)`);
+                }
+            } catch (err) {
+                console.error(`[Chunk ${chunk}] ⚠️ Failed to merge Samsung EPG:`, err.message);
             }
         }
 
