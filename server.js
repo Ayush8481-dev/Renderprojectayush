@@ -8,18 +8,11 @@ const PORT = process.env.PORT || 3000;
 const GITHUB_OWNER = "Ayush8481-dev"; // <--- CHANGE THIS IF NEEDED
 const GITHUB_REPO = "Epgdata";     // <--- CHANGE THIS IF NEEDED
 
-// High-speed Native String replace for XML (Escape)
+// High-speed Native String replace for XML
 const escapeMap = { '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' };
 const escapeXml = (unsafe) => {
     if (!unsafe) return "";
     return String(unsafe).replace(/[<>&'"]/g, c => escapeMap[c]);
-};
-
-// High-speed Native String replace for XML (Unescape)
-const unescapeMap = { '&lt;': '<', '&gt;': '>', '&amp;': '&', '&apos;': "'", '&quot;': '"' };
-const unescapeXml = (safe) => {
-    if (!safe) return "";
-    return String(safe).replace(/&lt;|&gt;|&amp;|&apos;|&quot;/g, c => unescapeMap[c]);
 };
 
 // Ultra-Fast Native Date slicing into IST (+0530)
@@ -28,16 +21,8 @@ const formatXmltvTime = (epoch) => {
     return iso.substring(0,4) + iso.substring(5,7) + iso.substring(8,10) + iso.substring(11,13) + iso.substring(14,16) + iso.substring(17,19) + " +0530";
 };
 
-// JioTV Full Language Mapping Table
-const langMap = {
-    'hindi': 1, 'marathi': 2, 'punjabi': 3, 'urdu': 4,
-    'bengali': 5, 'english': 6, 'malayalam': 7, 'tamil': 8,
-    'gujarati': 9, 'odia': 10, 'telugu': 11, 'bhojpuri': 12,
-    'kannada': 13, 'assamese': 14, 'nepali': 15, 'french': 16
-};
-
 // ==========================================
-// 🚀 API ENDPOINT - GENERATOR
+// 🚀 API ENDPOINT
 // ==========================================
 app.get('/generate', async (req, res) => {
     const chunk = req.query.chunk || '1';
@@ -47,88 +32,12 @@ app.get('/generate', async (req, res) => {
     const trigger = req.query.trigger === 'true';
 
     if (trigger) {
+        // Instantly release the cron-job connection
         res.status(200).json({ success: true, message: `Worker started for Chunk ${chunk}. Downloading directly from JioTV...` });
         runEpgTask(chunk, start, limit, offset); 
     } else {
         await runEpgTask(chunk, start, limit, offset);
         res.send(`✅ Chunk ${chunk} completed!`);
-    }
-});
-
-// ==========================================
-// 🧹 API ENDPOINT - AUTO CLEANUP (10 DAYS)
-// ==========================================
-app.get('/delete', async (req, res) => {
-    const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-    if (!GITHUB_TOKEN) return res.status(500).json({ success: false, error: "MISSING GITHUB TOKEN!" });
-
-    try {
-        const thresholdDate = new Date(Date.now() - (10 * 86400000) + 19800000).toISOString().substring(0, 10);
-        console.log(`[Cleaner] Checking for files strictly older than: ${thresholdDate}`);
-
-        const dirUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/Epg`;
-        const dirRes = await fetch(dirUrl, {
-            headers: { 
-                'Authorization': `Bearer ${GITHUB_TOKEN}`,
-                'Cache-Control': 'no-cache',
-                'Accept': 'application/vnd.github.v3+json'
-            }
-        });
-
-        if (!dirRes.ok) throw new Error(`GitHub API Error: ${await dirRes.text()}`);
-        
-        const files = await dirRes.json();
-        if (!Array.isArray(files)) return res.json({ success: true, message: "No files found or directory is empty." });
-
-        const filesToDelete = [];
-
-        for (const file of files) {
-            const match = file.name.match(/^(\d{4}-\d{2}-\d{2})-\d+\.xml$/);
-            if (match) {
-                const fileDateStr = match[1];
-                if (fileDateStr < thresholdDate) filesToDelete.push(file);
-            }
-        }
-
-        if (filesToDelete.length === 0) {
-            return res.json({ success: true, threshold_date: thresholdDate, message: `Strictly keeping 10 days catchup! No files deleted.` });
-        }
-
-        console.log(`[Cleaner] Found ${filesToDelete.length} old chunks. Starting deletion...`);
-        let deletedCount = 0;
-
-        for (const file of filesToDelete) {
-            try {
-                const delUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${file.path}`;
-                const delReq = await fetch(delUrl, {
-                    method: 'DELETE',
-                    headers: {
-                        'Authorization': `Bearer ${GITHUB_TOKEN}`,
-                        'Content-Type': 'application/json',
-                        'User-Agent': 'Express-EPG-Generator'
-                    },
-                    body: JSON.stringify({
-                        message: `Auto-Cleanup: Deleting Catchup EPG older than 10 days (${file.name})`,
-                        sha: file.sha
-                    })
-                });
-
-                if (delReq.ok) {
-                    console.log(`[Cleaner] 🗑️ Deleted: ${file.name}`);
-                    deletedCount++;
-                }
-                // Wait 1.5 Seconds between each deletion to completely avoid GitHub rate limits
-                await new Promise(r => setTimeout(r, 1500));
-            } catch (err) {
-                console.error(`[Cleaner] ⚠️ Network Error deleting ${file.name}:`, err.message);
-            }
-        }
-
-        return res.status(200).json({ success: true, message: `Cleanup Complete! Deleted ${deletedCount} old chunks.` });
-
-    } catch (error) {
-        console.error(`[Cleaner] ERROR:`, error.message);
-        if (!res.headersSent) res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -142,13 +51,11 @@ async function runEpgTask(chunk, start, limit, offset) {
         const channelsData = await chReq.json();
         const channelsArray = Array.isArray(channelsData) ? channelsData : (channelsData.channels || []);
 
-        const allJioChannelNames = new Set(channelsArray.map(c => c.name));
-
         const validChannels = channelsArray.map(c => ({
             name: c.name, 
             logo: c.logo || c.logoUrl || "", 
             jio_id: String(c.id || c.channel_id).trim(),
-            category: c.category || ""
+            category: c.category || "" // <-- ADDED: Extract category
         })).filter(c => c.jio_id && /^\d+$/.test(c.jio_id));
 
         const batch = validChannels.slice(start, start + limit);
@@ -156,19 +63,29 @@ async function runEpgTask(chunk, start, limit, offset) {
 
         console.log(`[Chunk ${chunk}] Firing ${batch.length} concurrent direct requests...`);
 
+        // Resilient Fetch Function with 5 Retries (Handles random dropped requests)
         const fetchChannelWithRetry = async (channel) => {
+            // <-- ADDED: Dynamic URL generation based on category
             let jioUrl = `https://jiotvapi.cdn.jio.com/apis/v1.3/getepg/get?channel_id=${channel.jio_id}&offset=${offset}`;
-            
-            const catName = channel.category.toLowerCase().trim();
-            if (langMap[catName]) jioUrl += `&langId=${langMap[catName]}`;
+            if (channel.category.toLowerCase() === 'telugu') {
+                jioUrl += `&langId=11`;
+            }
             
             let retries = 5; 
             while (retries > 0) {
                 try {
-                    const epgRes = await fetch(jioUrl, { headers: { 'User-Agent': 'okhttp/4.2.2', 'os': 'android', 'Accept': '*/*' }});
+                    const epgRes = await fetch(jioUrl, {
+                        headers: { 
+                            'User-Agent': 'okhttp/4.2.2',
+                            'os': 'android',
+                            'Accept': '*/*'
+                        }
+                    });
+                    
                     if (epgRes.ok) return { channel, data: await epgRes.json() };
                     if (epgRes.status === 404) return { channel, data: null };
                 } catch (err) {
+                    // Wait 500ms before retrying to let the network recover
                     await new Promise(r => setTimeout(r, 500));
                 }
                 retries--;
@@ -176,26 +93,33 @@ async function runEpgTask(chunk, start, limit, offset) {
             return { channel, data: null };
         };
 
+        // Fire all requests concurrently! (No ScraperAPI needed)
         const fetchPromises = batch.map((channel) => fetchChannelWithRetry(channel));
         const results = await Promise.all(fetchPromises);
 
         const xmlLines = [];
         let dynamicServerDate = null;
 
+        // Loop through results and apply exact Interleaved Layout (Channel -> Programs)
         for (let i = 0; i < results.length; i++) {
             const { channel, data } = results[i];
             
+            // Format Logo Fallback
             let finalLogo = channel.logo;
             if (finalLogo && !finalLogo.startsWith("http")) finalLogo = `https://jiotv.catchup.cdn.jio.com/dare_images/images/${finalLogo}`;
 
+            // Create <channel> Tag
             let channelBlock = `  <channel id="${channel.jio_id}">\n    <display-name>${escapeXml(channel.name)}</display-name>`;
             if (finalLogo) channelBlock += `\n    <icon src="${escapeXml(finalLogo)}" />`;
             channelBlock += `\n  </channel>`;
             
             xmlLines.push(channelBlock);
 
+            // Create <programme> Tags immediately underneath
             if (data && data.epg && data.epg.length > 0) {
-                if (!dynamicServerDate && data.epg[0].serverDate) dynamicServerDate = data.epg[0].serverDate.substring(0, 10); 
+                if (!dynamicServerDate && data.epg[0].serverDate) {
+                    dynamicServerDate = data.epg[0].serverDate.substring(0, 10); 
+                }
 
                 for (let j = 0; j < data.epg.length; j++) {
                     const show = data.epg[j];
@@ -210,76 +134,16 @@ async function runEpgTask(chunk, start, limit, offset) {
             }
         }
 
-        // ==========================================
-        // 🔄 CHUNK 6: SAMSUNG TV PLUS EPG MERGE (ULTRA-SAFE SPLIT METHOD)
-        // ==========================================
-        if (String(chunk) === '6') {
-            try {
-                console.log(`[Chunk ${chunk}] Fetching Samsung TV Plus EPG for merging...`);
-                const samRes = await fetch("https://raw.githubusercontent.com/matthuisman/i.mjh.nz/refs/heads/master/SamsungTVPlus/in.xml");
-                if (samRes.ok) {
-                    const samText = await samRes.text();
-                    const skippedSamIds = new Set();
-                    let addedChannels = 0;
-                    let addedProgrammes = 0;
-
-                    // 1. SAFELY EXTRACT CHANNELS (No global Regex breakage)
-                    const channelBlocks = samText.split('</channel>');
-                    for (let i = 0; i < channelBlocks.length - 1; i++) {
-                        const block = channelBlocks[i];
-                        const startIdx = block.indexOf('<channel ');
-                        if (startIdx === -1) continue;
-                        
-                        const fullBlock = block.substring(startIdx) + '</channel>';
-                        const idMatch = fullBlock.match(/<channel[^>]+id="([^"]+)"/);
-                        if (!idMatch) continue;
-                        
-                        const id = idMatch[1];
-                        const nameMatch = fullBlock.match(/<display-name[^>]*>([^<]+)<\/display-name>/);
-                        if (nameMatch) {
-                            const name = unescapeXml(nameMatch[1].trim()); 
-                            // Check deduplication (Exact match with JioTV)
-                            if (allJioChannelNames.has(name)) {
-                                skippedSamIds.add(id); 
-                                continue;
-                            }
-                        }
-                        
-                        xmlLines.push(fullBlock);
-                        addedChannels++;
-                    }
-
-                    // 2. SAFELY EXTRACT PROGRAMMES (No global Regex breakage)
-                    const progBlocks = samText.split('</programme>');
-                    for (let i = 0; i < progBlocks.length - 1; i++) {
-                        const block = progBlocks[i];
-                        const startIdx = block.indexOf('<programme ');
-                        if (startIdx === -1) continue;
-                        
-                        const fullBlock = block.substring(startIdx) + '</programme>';
-                        const idMatch = fullBlock.match(/<programme[^>]+channel="([^"]+)"/);
-                        if (!idMatch) continue;
-                        
-                        const id = idMatch[1];
-                        if (!skippedSamIds.has(id)) {
-                            xmlLines.push(fullBlock);
-                            addedProgrammes++;
-                        }
-                    }
-                    console.log(`[Chunk ${chunk}] ✅ Merged Samsung EPG: Added ${addedChannels} unique channels & ${addedProgrammes} programmes. (Duplicates skipped)`);
-                }
-            } catch (err) {
-                console.error(`[Chunk ${chunk}] ⚠️ Failed to merge Samsung EPG:`, err.message);
-            }
-        }
-
+        // Apply Server Date Fallback if missing
         if (!dynamicServerDate) {
             const istDate = new Date(Date.now() + 19800000 + (offset * 86400000)); 
             dynamicServerDate = istDate.toISOString().substring(0, 10);
         }
 
+        // Combine into Final Output
         const finalXml = `<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n${xmlLines.join('\n')}\n</tv>`;
 
+        // Upload to GitHub
         const FILE_PATH = `Epg/${dynamicServerDate}-${chunk}.xml`;
         await uploadToGitHub(FILE_PATH, finalXml, chunk);
 
@@ -299,9 +163,10 @@ async function uploadToGitHub(filePath, xmlContent, chunkName) {
     const githubFileUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${filePath}`;
     const fileContentBase64 = Buffer.from(xmlContent, 'utf-8').toString('base64');
     
+    // STEP 1: Check if the exact same file exists
     let fileSha = undefined;
     try {
-        const checkExisting = await fetch(`${githubFileUrl}?t=${Date.now()}`, {
+        const checkExisting = await fetch(`${githubFileUrl}?t=${Date.now()}`, { // cache buster ensures live check
             headers: { 
                 'Authorization': `Bearer ${GITHUB_TOKEN}`,
                 'Cache-Control': 'no-cache'
@@ -315,6 +180,7 @@ async function uploadToGitHub(filePath, xmlContent, chunkName) {
         console.error(`[Chunk ${chunkName}] Error checking for existing file.`);
     }
 
+    // STEP 2: If the file exists, DELETE it first
     if (fileSha) {
         console.log(`[Chunk ${chunkName}] 🗑️ Exact same file found. Deleting it first...`);
         const deleteRes = await fetch(githubFileUrl, {
@@ -337,6 +203,7 @@ async function uploadToGitHub(filePath, xmlContent, chunkName) {
         }
     }
 
+    // STEP 3: UPLOAD the fresh new file
     console.log(`[Chunk ${chunkName}] 📤 Uploading new file...`);
     const uploadResponse = await fetch(githubFileUrl, {
         method: 'PUT',
