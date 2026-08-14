@@ -52,7 +52,10 @@ async function runEpgTask(chunk, start, limit, offset) {
         const channelsArray = Array.isArray(channelsData) ? channelsData : (channelsData.channels || []);
 
         const validChannels = channelsArray.map(c => ({
-            name: c.name, logo: c.logo || c.logoUrl || "", jio_id: String(c.id || c.channel_id).trim()
+            name: c.name, 
+            logo: c.logo || c.logoUrl || "", 
+            jio_id: String(c.id || c.channel_id).trim(),
+            category: c.category || "" // <-- ADDED: Extract category
         })).filter(c => c.jio_id && /^\d+$/.test(c.jio_id));
 
         const batch = validChannels.slice(start, start + limit);
@@ -62,7 +65,11 @@ async function runEpgTask(chunk, start, limit, offset) {
 
         // Resilient Fetch Function with 5 Retries (Handles random dropped requests)
         const fetchChannelWithRetry = async (channel) => {
-            const jioUrl = `https://jiotvapi.cdn.jio.com/apis/v1.3/getepg/get?channel_id=${channel.jio_id}&offset=${offset}`;
+            // <-- ADDED: Dynamic URL generation based on category
+            let jioUrl = `https://jiotvapi.cdn.jio.com/apis/v1.3/getepg/get?channel_id=${channel.jio_id}&offset=${offset}`;
+            if (channel.category.toLowerCase() === 'telugu') {
+                jioUrl += `&langId=11`;
+            }
             
             let retries = 5; 
             while (retries > 0) {
